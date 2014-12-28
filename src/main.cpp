@@ -22,6 +22,8 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
 
 using namespace std;
 using namespace boost;
@@ -1154,7 +1156,7 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos)
     }
 
     // Check the header
-    if (!CheckProofOfWork(block.GetHash(), block.nBits))
+    if (!CheckProofOfWork(block.GetPoWHash(), block.nBits))
         return error("ReadBlockFromDisk : Errors in block header");
 
     return true;
@@ -1209,23 +1211,49 @@ void static PruneOrphanBlocks()
     mapOrphanBlocks.erase(hash);
 }
 
-int64_t GetBlockValue(int nHeight, int64_t nFees)
+int static generateMTRandom(unsigned int s, int range)
 {
-    int64_t nSubsidy = 50 * COIN;
-    int halvings = nHeight / Params().SubsidyHalvingInterval();
+	random::mt19937 gen(s);
+    random::uniform_int_distribution<> dist(1, range);
+    return dist(gen);
+}
 
-    // Force block reward to zero when right shift is undefined.
-    if (halvings >= 64)
-        return nFees;
 
-    // Subsidy is cut in half every 210,000 blocks which will occur approximately every 4 years.
-    nSubsidy >>= halvings;
+int64_t GetBlockValue(int nHeight, int64_t nFees, uint256 prevHash)
+{
+		int64_t nSubsidy = 0 * COIN;
+
+        std::string cseed_str = prevHash.ToString().substr(8,7);
+		const char* cseed = cseed_str.c_str();
+		long seed = hex2long(cseed);
+
+		int rand = generateMTRandom(seed, 100000);
+
+		if(rand < 20000)		
+			nSubsidy = 1 * COIN;
+		else if(rand < 40000)	
+			nSubsidy = 2 * COIN;
+		else if(rand < 60000)	
+			nSubsidy = 3 * COIN;
+		else if(rand < 80000)	
+			nSubsidy = 4 * COIN;
+		else if(rand < 100001)	
+			nSubsidy = 5 * COIN;
+    
+	    if(nHeight == 1)   
+			nSubsidy = 200000 * COIN;
+		else if(nHeight < 500)
+			nSubsidy = 0 * COIN;
+		else if(nHeight < 1000)
+			nSubsidy = 1 * COIN;
+		else if(nHeight < 1500)
+			nSubsidy = 2 * COIN;
 
     return nSubsidy + nFees;
 }
 
-static const int64_t nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-static const int64_t nTargetSpacing = 10 * 60;
+static const int64_t nTargetTimespan = 32 * 250; // Argentum: every 250 blocks
+static const int64_t nTargetSpacing = 32; // Argentum: 32 sec
 static const int64_t nInterval = nTargetTimespan / nTargetSpacing;
 
 //
@@ -1245,7 +1273,7 @@ unsigned int ComputeMinWork(unsigned int nBase, int64_t nTime)
     while (nTime > 0 && bnResult < bnLimit)
     {
         // Maximum 400% adjustment...
-        bnResult *= 4;
+        bnResult *= 2;
         // ... in best-case exactly 4-times-normal target time
         nTime -= nTargetTimespan*4;
     }
@@ -1257,6 +1285,7 @@ unsigned int ComputeMinWork(unsigned int nBase, int64_t nTime)
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock)
 {
     unsigned int nProofOfWorkLimit = Params().ProofOfWorkLimit().GetCompact();
+    int nHeight = pindexLast->nHeight + 1;
 
     // Genesis block
     if (pindexLast == NULL)
@@ -1268,7 +1297,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         if (TestNet())
         {
             // Special difficulty rule for testnet:
-            // If the new block's timestamp is more than 2* 10 minutes
+            // If the new block's timestamp is more than 2* 2 minutes
             // then allow mining of a min-difficulty block.
             if (pblock->nTime > pindexLast->nTime + nTargetSpacing*2)
                 return nProofOfWorkLimit;
@@ -1284,19 +1313,52 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         return pindexLast->nBits;
     }
 
-    // Go back by what we want to be 14 days worth of blocks
+    // argentum: This fixes an issue where a 51% attack can change difficulty at will.
+    // Go back the full period unless it's the first retarget after genesis. Code courtesy of Art Forz
+    int blockstogoback = nInterval-1;
+    if ((pindexLast->nHeight+1) != nInterval)
+        blockstogoback = nInterval;
+
+    // Go back by what we want to be a days worth of blocks
     const CBlockIndex* pindexFirst = pindexLast;
-    for (int i = 0; pindexFirst && i < nInterval-1; i++)
+    for (int i = 0; pindexFirst && i < blockstogoback; i++)
         pindexFirst = pindexFirst->pprev;
     assert(pindexFirst);
 
     // Limit adjustment step
     int64_t nActualTimespan = pindexLast->GetBlockTime() - pindexFirst->GetBlockTime();
     LogPrintf("  nActualTimespan = %d  before bounds\n", nActualTimespan);
-    if (nActualTimespan < nTargetTimespan/4)
-        nActualTimespan = nTargetTimespan/4;
-    if (nActualTimespan > nTargetTimespan*4)
-        nActualTimespan = nTargetTimespan*4;
+
+    if(nHeight >= 111500){
+	if (nActualTimespan < ((nTargetTimespan*55)/73))
+		nActualTimespan = ((nTargetTimespan*55)/73);
+	if (nActualTimespan > ((nTargetTimespan*75)/60))
+		nActualTimespan = ((nTargetTimespan*75)/60);
+    }
+    else if(nHeight >= 79000){
+	if (nActualTimespan < nTargetTimespan/2)
+		nActualTimespan = nTargetTimespan/2;
+	if (nActualTimespan > nTargetTimespan*2)
+		nActualTimespan = nTargetTimespan*2;
+    }
+    else if(nHeight > 10000){
+	if (nActualTimespan < nTargetTimespan/4)
+		nActualTimespan = nTargetTimespan/4;
+	if (nActualTimespan > nTargetTimespan*4)
+		nActualTimespan = nTargetTimespan*4;
+    }
+    else if(nHeight > 5000){
+	if (nActualTimespan < nTargetTimespan/8)
+		nActualTimespan = nTargetTimespan/8;
+	if (nActualTimespan > nTargetTimespan*4)
+		nActualTimespan = nTargetTimespan*4;
+    }
+    else{
+	if (nActualTimespan < nTargetTimespan/16)
+		nActualTimespan = nTargetTimespan/16;
+	if (nActualTimespan > nTargetTimespan*4)
+		nActualTimespan = nTargetTimespan*4;
+    }
 
     // Retarget
     CBigNum bnNew;
@@ -1781,9 +1843,10 @@ bool ConnectBlock(CBlock& block, CValidationState& state, CBlockIndex* pindex, C
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes in their
     // initial block download.
-    bool fEnforceBIP30 = (!pindex->phashBlock) || // Enforce on CreateNewBlock invocations which don't have a hash.
-                          !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
-                           (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
+
+    int64_t nBIP30SwitchTime = 1349049600;
+    bool fEnforceBIP30 = (pindex->nTime > nBIP30SwitchTime);
+
     if (fEnforceBIP30) {
         for (unsigned int i = 0; i < block.vtx.size(); i++) {
             uint256 hash = block.GetTxHash(i);
@@ -1794,7 +1857,7 @@ bool ConnectBlock(CBlock& block, CValidationState& state, CBlockIndex* pindex, C
     }
 
     // BIP16 didn't become active until Apr 1 2012
-    int64_t nBIP16SwitchTime = 1333238400;
+    int64_t nBIP16SwitchTime = 1349049600;
     bool fStrictPayToScriptHash = (pindex->nTime >= nBIP16SwitchTime);
 
     unsigned int flags = SCRIPT_VERIFY_NOCACHE |
@@ -1858,10 +1921,16 @@ bool ConnectBlock(CBlock& block, CValidationState& state, CBlockIndex* pindex, C
     if (fBenchmark)
         LogPrintf("- Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin)\n", (unsigned)block.vtx.size(), 0.001 * nTime, 0.001 * nTime / block.vtx.size(), nInputs <= 1 ? 0 : 0.001 * nTime / (nInputs-1));
 
-    if (block.vtx[0].GetValueOut() > GetBlockValue(pindex->nHeight, nFees))
+    uint256 prevHash = 0;
+    if(pindex->pprev)
+    {
+	prevHash = pindex->pprev->GetBlockHash();
+    }
+
+    if (block.vtx[0].GetValueOut() > GetBlockValue(pindex->nHeight, nFees, prevHash))
         return state.DoS(100,
                          error("ConnectBlock() : coinbase pays too much (actual=%d vs limit=%d)",
-                               block.vtx[0].GetValueOut(), GetBlockValue(pindex->nHeight, nFees)),
+                               block.vtx[0].GetValueOut(), GetBlockValue(pindex->nHeight, nFees, prevHash)),
                                REJECT_INVALID, "bad-cb-amount");
 
     if (!control.Wait())
@@ -2323,7 +2392,7 @@ bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bo
                          REJECT_INVALID, "bad-blk-length");
 
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits))
+    if (fCheckPOW && !CheckProofOfWork(block.GetPoWHash(), block.nBits))
         return state.DoS(50, error("CheckBlock() : proof of work failed"),
                          REJECT_INVALID, "high-hash");
 
